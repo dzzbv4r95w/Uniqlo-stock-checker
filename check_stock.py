@@ -1,15 +1,10 @@
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import os
 import json
+import requests
 
-# Secrets from GitHub
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
 
 STATE_FILE = "stock_state.json"
 
@@ -27,71 +22,75 @@ def save_state(state):
         json.dump(state, f)
 
 
-def get_product_name(soup):
-    h1 = soup.find("h1")
-    if h1:
-        return h1.get_text(strip=True)
-    return "Unknown product"
-
-
-def is_in_stock(soup):
-    """
-    Belgium logic (button-based only):
-
-    ❌ If ANY button contains "de nouveau en stock" → OUT OF STOCK
-    ✅ Otherwise → IN STOCK
-
-    We intentionally ignore "ajouter au panier" because it exists
-    in Uniqlo templates even when product is unavailable.
-    """
-
-    buttons = soup.find_all("button")
-
-    for btn in buttons:
-        text = btn.get_text(" ", strip=True).lower()
-
-        # Strong OUT signal
-        if "de nouveau en stock" in text:
-            return False
-
-    # If the OUT button is NOT present, treat as IN
-    return True
-
-
 def notify(product_name, url):
-    message = {
+    payload = {
         "content": f"🚨 **IN STOCK!**\n**{product_name}**\n{url}"
     }
-    requests.post(DISCORD_WEBHOOK, json=message, timeout=10)
+    requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+
+
+def check_product(page, url):
+    page.goto(url, wait_until="networkidle", timeout=60000)
+
+    # Give JS time to update buttons
+    page.wait_for_timeout(3000)
+
+    content = page.content().lower()
+
+    # OUT OF STOCK signal (real rendered text)
+    if "de nouveau en stock" in content:
+        return False
+
+    # IN STOCK signal
+    if "ajouter au panier" in content or "ajouter au sac" in content:
+        return True
+
+    # Safe fallback
+    return False
+
+
+def get_product_name(page):
+    try:
+        h1 = page.query_selector("h1")
+        if h1:
+            return h1.inner_text().strip()
+    except:
+        pass
+    return "Unknown product"
 
 
 def main():
     state = load_state()
 
-    for raw_url in PRODUCT_URLS:
-        url = raw_url.strip()
-        if not url:
-            continue
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(response.text, "html.parser")
+        for raw_url in PRODUCT_URLS:
+            url = raw_url.strip()
+            if not url:
+                continue
 
-            product_name = get_product_name(soup)
-            in_stock = is_in_stock(soup)
+            try:
+                print("Checking:", url)
 
-            last_status = state.get(url)
+                in_stock = check_product(page, url)
+                name = get_product_name(page)
 
-            # ✅ Alert only when OUT → IN
-            if in_stock and last_status != "in":
-                notify(product_name, url)
-                print(f"ALERT SENT: {product_name}")
+                last_status = state.get(url)
 
-            state[url] = "in" if in_stock else "out"
-            print(f"{product_name}: {'IN STOCK' if in_stock else 'OUT OF STOCK'}")
+                # Alert only when OUT → IN
+                if in_stock and last_status != "in":
+                    notify(name, url)
+                    print("ALERT SENT:", name)
 
-        except Exception as e:
-            print("Error checking:", url, e)
+                state[url] = "in" if in_stock else "out"
+                print(name, "=>", "IN STOCK" if in_stock else "OUT OF STOCK")
+
+            except Exception as e:
+                print("Error:", url, e)
+
+        browser.close()
 
     save_state(state)
 
