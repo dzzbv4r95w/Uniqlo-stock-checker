@@ -2,7 +2,7 @@ name: Uniqlo Stock Checker
 
 on:
   schedule:
-    - cron: "0,20 * * * *"  # toutes les 30 minutes
+    - cron: "0,30 * * * *"  # toutes les 30 minutes
   workflow_dispatch:
 
 jobs:
@@ -15,9 +15,11 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: |
+          pip install playwright requests
+          playwright install
       - name: Run stock checker
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           PRODUCT_URLS: ${{ secrets.PRODUCT_URLS }}
-        run: python check_stock.py
+        run: python check_stock_playwright_parallel_final.py
