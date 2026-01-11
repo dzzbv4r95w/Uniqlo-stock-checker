@@ -36,41 +36,22 @@ def get_product_name(soup):
 
 def is_in_stock(soup):
     """
-    STRICT LOGIC (prevents false positives):
-
-    1) If ANY "de nouveau" text exists anywhere → OUT
-    2) Look for a real visible button with:
-       - text contains "ajouter au panier" or "ajouter au sac"
-       - button is NOT disabled
-    3) Only then → IN
-    Otherwise → OUT
+    Balanced Belgium logic:
+    - If "de nouveau en stock" exists → OUT
+    - Else if "ajouter au panier" or "ajouter au sac" exists → IN
+    - Else → OUT
     """
 
-    page_text = soup.get_text(" ", strip=True).lower()
+    text = soup.get_text(" ", strip=True).lower()
 
-    # ❌ Always trust OUT first
-    if "de nouveau" in page_text:
+    # ❌ OUT has priority
+    if "de nouveau en stock" in text:
         return False
 
-    buttons = soup.find_all("button")
+    # ✅ IN
+    if "ajouter au panier" in text or "ajouter au sac" in text:
+        return True
 
-    for btn in buttons:
-        text = btn.get_text(" ", strip=True).lower()
-
-        # Check real Add-to-cart button
-        if "ajouter au panier" in text or "ajouter au sac" in text:
-            # If button is disabled, it's not in stock
-            if btn.has_attr("disabled"):
-                return False
-
-            aria_disabled = btn.get("aria-disabled", "").lower()
-            if aria_disabled == "true":
-                return False
-
-            # Looks like a real enabled buy button
-            return True
-
-    # Safe fallback: assume OUT
     return False
 
 
