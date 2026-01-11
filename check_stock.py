@@ -1,99 +1,79 @@
-from playwright.sync_api import sync_playwright
-import os
-import json
 import requests
+from bs4 import BeautifulSoup
+import json
+import os
 
+# --- Configuration ---
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
-PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")
-
+PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # Sépare tes URLs par des virgules dans le secret
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 STATE_FILE = "stock_state.json"
 
-
+# --- Fonctions ---
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    except:
+    except FileNotFoundError:
         return {}
-
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-
-def notify(product_name, url):
-    payload = {
+def notify_discord(product_name, url):
+    message = {
         "content": f"🚨 **IN STOCK!**\n**{product_name}**\n{url}"
     }
-    requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-
-
-def check_product(page, url):
-    page.goto(url, wait_until="networkidle", timeout=60000)
-
-    # Give JS time to update buttons
-    page.wait_for_timeout(3000)
-
-    content = page.content().lower()
-
-    # OUT OF STOCK signal (real rendered text)
-    if "de nouveau en stock" in content:
-        return False
-
-    # IN STOCK signal
-    if "ajouter au panier" in content or "ajouter au sac" in content:
-        return True
-
-    # Safe fallback
-    return False
-
-
-def get_product_name(page):
     try:
-        h1 = page.query_selector("h1")
-        if h1:
-            return h1.inner_text().strip()
-    except:
-        pass
-    return "Unknown product"
+        requests.post(DISCORD_WEBHOOK, json=message, timeout=10)
+    except Exception as e:
+        print("Erreur Discord:", e)
 
+def check_stock(url):
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, "html.parser")
 
+        # Nom du produit
+        h1 = soup.find("h1")
+        product_name = h1.get_text(strip=True) if h1 else "Produit inconnu"
+
+        # Vérifier bouton "Ajouter au panier"
+        btn = soup.find("button", string=lambda x: x and "Ajouter au panier" in x)
+        in_stock = bool(btn)
+
+        return product_name, in_stock
+
+    except Exception as e:
+        print("Erreur sur URL:", url, e)
+        return "Erreur produit", False
+
+# --- Main ---
 def main():
     state = load_state()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+    for url in PRODUCT_URLS:
+        url = url.strip()
+        if not url:
+            continue
 
-        for raw_url in PRODUCT_URLS:
-            url = raw_url.strip()
-            if not url:
-                continue
+        product_name, in_stock = check_stock(url)
+        last_status = state.get(url)
 
-            try:
-                print("Checking:", url)
+        print(f"{product_name} => {'IN STOCK' if in_stock else 'OUT OF STOCK'}")
 
-                in_stock = check_product(page, url)
-                name = get_product_name(page)
+        # Alert only when OUT → IN
+        if in_stock and last_status != "in":
+            notify_discord(product_name, url)
+            print("ALERTE envoyée:", product_name)
 
-                last_status = state.get(url)
-
-                # Alert only when OUT → IN
-                if in_stock and last_status != "in":
-                    notify(name, url)
-                    print("ALERT SENT:", name)
-
-                state[url] = "in" if in_stock else "out"
-                print(name, "=>", "IN STOCK" if in_stock else "OUT OF STOCK")
-
-            except Exception as e:
-                print("Error:", url, e)
-
-        browser.close()
+        # Mettre à jour l'état
+        state[url] = "in" if in_stock else "out"
 
     save_state(state)
-
 
 if __name__ == "__main__":
     main()
