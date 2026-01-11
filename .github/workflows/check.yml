@@ -1,42 +1,23 @@
-name: Uniqlo Stock Checker (Playwright)
+name: Uniqlo Stock Checker
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0,20 * * * *"  # toutes les 30 minutes
   workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Restore stock cache
-        uses: actions/cache@v4
-        with:
-          path: stock_state.json
-          key: stock-state-playwright-v1
-
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
-        run: |
-          pip install playwright requests
-          playwright install chromium
-
-      - name: Run checker
+        run: pip install requests beautifulsoup4
+      - name: Run stock checker
         env:
-          PRODUCT_URLS: ${{ secrets.PRODUCT_URLS }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          PRODUCT_URLS: ${{ secrets.PRODUCT_URLS }}
         run: python check_stock.py
-
-      - name: Save stock cache
-        uses: actions/cache@v4
-        with:
-          path: stock_state.json
-          key: stock-state-playwright-v1
