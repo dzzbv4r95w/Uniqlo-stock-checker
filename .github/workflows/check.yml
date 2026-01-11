@@ -22,4 +22,4 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           PRODUCT_URLS: ${{ secrets.PRODUCT_URLS }}
-        run: python check_stock_playwright_parallel_final.py
+        run: python check_stock.py
