@@ -9,8 +9,7 @@ DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # séparer par virgule
 STATE_FILE = "stock_state.json"
 PAGE_TIMEOUT = 20000  # 20s max pour goto
-BUTTON_TIMEOUT = 5000  # 5s pour attendre le bouton
-MAX_RETRIES = 2  # nombre de tentatives par produit
+MAX_RETRIES = 2       # Nombre de tentatives par produit
 
 # --- Fonctions ---
 def load_state():
@@ -39,21 +38,25 @@ async def check_product(page, url):
 
     for attempt in range(MAX_RETRIES):
         try:
-            # Charger la page rapidement (DOM initial seulement)
+            print(f"→ Tentative {attempt+1} pour {url}")
+            # Charger la page rapidement (DOM initial)
             await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
 
             # Nom du produit
             h1 = await page.query_selector("h1")
             if h1:
                 product_name = (await h1.inner_text()).strip()
+            print(f"Produit détecté: {product_name}")
 
             # Chercher tous les boutons et détecter "Ajouter au panier"
             sizes_buttons = await page.query_selector_all("button")
+            stock_info = {}
             for btn in sizes_buttons:
                 text = (await btn.inner_text()).strip()
                 size_attr = await btn.get_attribute("data-size") or "Taille inconnue"
                 stock_info[size_attr] = "Ajouter au panier" in text
 
+            print(f"Stock info: {stock_info}")
             return product_name, stock_info
 
         except PlaywrightTimeoutError:
@@ -97,6 +100,7 @@ async def main():
         await browser.close()
 
     save_state(state)
+    print("✅ Vérification terminée.")
 
 if __name__ == "__main__":
     asyncio.run(main())
