@@ -8,7 +8,9 @@ import requests
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # séparer par virgule
 STATE_FILE = "stock_state.json"
-TIMEOUT = 15000  # 15 secondes max par page
+PAGE_TIMEOUT = 20000  # 20s max pour goto
+BUTTON_TIMEOUT = 5000  # 5s pour attendre le bouton
+MAX_RETRIES = 2  # nombre de tentatives par produit
 
 # --- Fonctions ---
 def load_state():
@@ -32,32 +34,37 @@ def notify_discord(product_name, size, url):
         print("Erreur Discord:", e)
 
 async def check_product(page, url):
-    try:
-        await page.goto(url, timeout=TIMEOUT)
+    product_name = "Produit inconnu"
+    stock_info = {}
 
-        # Attendre que le bouton “Ajouter au panier” apparaisse, max TIMEOUT
+    for attempt in range(MAX_RETRIES):
         try:
-            await page.wait_for_selector("button:has-text('Ajouter au panier')", timeout=TIMEOUT)
+            # Charger la page rapidement (DOM initial seulement)
+            await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+
+            # Nom du produit
+            h1 = await page.query_selector("h1")
+            if h1:
+                product_name = (await h1.inner_text()).strip()
+
+            # Chercher tous les boutons et détecter "Ajouter au panier"
+            sizes_buttons = await page.query_selector_all("button")
+            for btn in sizes_buttons:
+                text = (await btn.inner_text()).strip()
+                size_attr = await btn.get_attribute("data-size") or "Taille inconnue"
+                stock_info[size_attr] = "Ajouter au panier" in text
+
+            return product_name, stock_info
+
         except PlaywrightTimeoutError:
-            print(f"Pas de bouton détecté sur {url} (hors stock ou page lente)")
+            print(f"Timeout sur {url}, tentative {attempt+1}")
+            await asyncio.sleep(1)  # petite pause avant la prochaine tentative
+        except Exception as e:
+            print(f"Erreur sur {url}: {e}")
+            return product_name, {}
 
-        # Nom du produit
-        h1 = await page.query_selector("h1")
-        product_name = (await h1.inner_text()).strip() if h1 else "Produit inconnu"
-
-        # Vérifier chaque taille
-        stock_info = {}
-        sizes_buttons = await page.query_selector_all("button")
-        for btn in sizes_buttons:
-            text = (await btn.inner_text()).strip()
-            size_attr = await btn.get_attribute("data-size") or "Taille inconnue"
-            stock_info[size_attr] = "Ajouter au panier" in text
-
-        return product_name, stock_info
-
-    except Exception as e:
-        print(f"Erreur sur {url}: {e}")
-        return "Erreur produit", {}
+    # Si timeout répété → considérer hors stock
+    return product_name, stock_info
 
 async def main():
     state = load_state()
@@ -79,6 +86,7 @@ async def main():
             state[url] = stock_info
             await page.close()
 
+        # Créer une tâche par produit
         for url in PRODUCT_URLS:
             url = url.strip()
             if url:
