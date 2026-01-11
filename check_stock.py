@@ -9,7 +9,6 @@ DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # séparer par virgule
 STATE_FILE = "stock_state.json"
 TIMEOUT = 15000  # 15 secondes max par page
-WAIT_JS = 1500  # 1.5 sec pour le JS
 
 # --- Fonctions ---
 def load_state():
@@ -35,7 +34,12 @@ def notify_discord(product_name, size, url):
 async def check_product(page, url):
     try:
         await page.goto(url, timeout=TIMEOUT)
-        await page.wait_for_timeout(WAIT_JS)  # laisser le JS charger
+
+        # Attendre que le bouton “Ajouter au panier” apparaisse, max TIMEOUT
+        try:
+            await page.wait_for_selector("button:has-text('Ajouter au panier')", timeout=TIMEOUT)
+        except PlaywrightTimeoutError:
+            print(f"Pas de bouton détecté sur {url} (hors stock ou page lente)")
 
         # Nom du produit
         h1 = await page.query_selector("h1")
@@ -43,19 +47,14 @@ async def check_product(page, url):
 
         # Vérifier chaque taille
         stock_info = {}
-        # Sélecteur générique pour les boutons "Ajouter au panier" en français
         sizes_buttons = await page.query_selector_all("button")
         for btn in sizes_buttons:
             text = (await btn.inner_text()).strip()
             size_attr = await btn.get_attribute("data-size") or "Taille inconnue"
-            # True si le bouton indique clairement "Ajouter au panier"
             stock_info[size_attr] = "Ajouter au panier" in text
 
         return product_name, stock_info
 
-    except PlaywrightTimeoutError:
-        print(f"Timeout sur {url}")
-        return "Erreur produit", {}
     except Exception as e:
         print(f"Erreur sur {url}: {e}")
         return "Erreur produit", {}
@@ -77,11 +76,9 @@ async def main():
                     notify_discord(product_name, size, url)
                     print(f"ALERTE envoyée: {product_name} Taille {size}")
 
-            # Mise à jour de l'état local
             state[url] = stock_info
             await page.close()
 
-        # Créer une tâche pour chaque produit
         for url in PRODUCT_URLS:
             url = url.strip()
             if url:
@@ -91,7 +88,6 @@ async def main():
         await asyncio.gather(*tasks)
         await browser.close()
 
-    # Sauvegarder l'état pour éviter le spam
     save_state(state)
 
 if __name__ == "__main__":
