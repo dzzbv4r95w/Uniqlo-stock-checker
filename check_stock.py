@@ -35,41 +35,24 @@ def get_product_name(soup):
 
 
 def is_in_stock(soup):
-    text = soup.get_text(" ", strip=True).lower()
+    """
+    IMPORTANT LOGIC:
+    - If "de nouveau en stock" exists anywhere → OUT (real state)
+    - Only if NOT found → look for "ajouter au panier" → IN
+    - Otherwise → OUT
+    """
 
-    # ❌ OUT OF STOCK keywords (Belgium FR + NL + EN)
-    out_keywords = [
-        "out of stock",
-        "sold out",
-        "rupture de stock",
-        "épuisé",
-        "me notifier",
-        "notifier",
-        "niet op voorraad",
-        "momenteel niet beschikbaar",
-        "breng mij op de hoogte",
-        "verwittig"
-    ]
+    page_text = soup.get_text(" ", strip=True).lower()
 
-    for word in out_keywords:
-        if word in text:
-            return False
+    # ❌ Always prioritize OUT
+    if "de nouveau en stock" in page_text:
+        return False
 
-    # ✅ IN STOCK keywords (Belgium FR + NL + EN)
-    in_keywords = [
-        "add to cart",
-        "add to bag",
-        "ajouter au panier",
-        "ajouter au sac",
-        "in winkelwagen",
-        "toevoegen"
-    ]
+    # ✅ Only then allow IN
+    if "ajouter au panier" in page_text or "ajouter au sac" in page_text:
+        return True
 
-    for word in in_keywords:
-        if word in text:
-            return True
-
-    # Default fallback
+    # Safe fallback
     return False
 
 
@@ -97,12 +80,11 @@ def main():
 
             last_status = state.get(url)
 
-            # ✅ Alert only when status changes from OUT → IN
+            # ✅ Alert only when OUT → IN
             if in_stock and last_status != "in":
                 notify(product_name, url)
                 print(f"ALERT SENT: {product_name}")
 
-            # Save current state
             state[url] = "in" if in_stock else "out"
             print(f"{product_name}: {'IN STOCK' if in_stock else 'OUT OF STOCK'}")
 
