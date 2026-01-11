@@ -36,23 +36,26 @@ def get_product_name(soup):
 
 def is_in_stock(soup):
     """
-    Balanced Belgium logic:
-    - If "de nouveau en stock" exists → OUT
-    - Else if "ajouter au panier" or "ajouter au sac" exists → IN
-    - Else → OUT
+    Belgium logic (button-based only):
+
+    ❌ If ANY button contains "de nouveau en stock" → OUT OF STOCK
+    ✅ Otherwise → IN STOCK
+
+    We intentionally ignore "ajouter au panier" because it exists
+    in Uniqlo templates even when product is unavailable.
     """
 
-    text = soup.get_text(" ", strip=True).lower()
+    buttons = soup.find_all("button")
 
-    # ❌ OUT has priority
-    if "de nouveau en stock" in text:
-        return False
+    for btn in buttons:
+        text = btn.get_text(" ", strip=True).lower()
 
-    # ✅ IN
-    if "ajouter au panier" in text or "ajouter au sac" in text:
-        return True
+        # Strong OUT signal
+        if "de nouveau en stock" in text:
+            return False
 
-    return False
+    # If the OUT button is NOT present, treat as IN
+    return True
 
 
 def notify(product_name, url):
