@@ -1,15 +1,15 @@
-import requests
-from bs4 import BeautifulSoup
 import json
 import os
+import asyncio
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+import requests
 
 # --- Configuration ---
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
-PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # Sépare tes URLs par des virgules dans le secret
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")  # séparer par virgule
 STATE_FILE = "stock_state.json"
+TIMEOUT = 15000  # 15 secondes max par page
+WAIT_JS = 1500  # 1.5 sec pour le JS
 
 # --- Fonctions ---
 def load_state():
@@ -23,57 +23,76 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-def notify_discord(product_name, url):
+def notify_discord(product_name, size, url):
     message = {
-        "content": f"🚨 **IN STOCK!**\n**{product_name}**\n{url}"
+        "content": f"🚨 **IN STOCK!**\nProduit: **{product_name}**\nTaille: {size}\n{url}"
     }
     try:
         requests.post(DISCORD_WEBHOOK, json=message, timeout=10)
     except Exception as e:
         print("Erreur Discord:", e)
 
-def check_stock(url):
+async def check_product(page, url):
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(response.text, "html.parser")
+        await page.goto(url, timeout=TIMEOUT)
+        await page.wait_for_timeout(WAIT_JS)  # laisser le JS charger
 
         # Nom du produit
-        h1 = soup.find("h1")
-        product_name = h1.get_text(strip=True) if h1 else "Produit inconnu"
+        h1 = await page.query_selector("h1")
+        product_name = (await h1.inner_text()).strip() if h1 else "Produit inconnu"
 
-        # Vérifier bouton "Ajouter au panier"
-        btn = soup.find("button", string=lambda x: x and "Ajouter au panier" in x)
-        in_stock = bool(btn)
+        # Vérifier chaque taille
+        stock_info = {}
+        # Sélecteur générique pour les boutons "Ajouter au panier" en français
+        sizes_buttons = await page.query_selector_all("button")
+        for btn in sizes_buttons:
+            text = (await btn.inner_text()).strip()
+            size_attr = await btn.get_attribute("data-size") or "Taille inconnue"
+            # True si le bouton indique clairement "Ajouter au panier"
+            stock_info[size_attr] = "Ajouter au panier" in text
 
-        return product_name, in_stock
+        return product_name, stock_info
 
+    except PlaywrightTimeoutError:
+        print(f"Timeout sur {url}")
+        return "Erreur produit", {}
     except Exception as e:
-        print("Erreur sur URL:", url, e)
-        return "Erreur produit", False
+        print(f"Erreur sur {url}: {e}")
+        return "Erreur produit", {}
 
-# --- Main ---
-def main():
+async def main():
     state = load_state()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        tasks = []
 
-    for url in PRODUCT_URLS:
-        url = url.strip()
-        if not url:
-            continue
+        async def process_url(url):
+            page = await browser.new_page()
+            product_name, stock_info = await check_product(page, url)
+            last_state = state.get(url, {})
 
-        product_name, in_stock = check_stock(url)
-        last_status = state.get(url)
+            for size, available in stock_info.items():
+                last_available = last_state.get(size)
+                if available and last_available != True:
+                    notify_discord(product_name, size, url)
+                    print(f"ALERTE envoyée: {product_name} Taille {size}")
 
-        print(f"{product_name} => {'IN STOCK' if in_stock else 'OUT OF STOCK'}")
+            # Mise à jour de l'état local
+            state[url] = stock_info
+            await page.close()
 
-        # Alert only when OUT → IN
-        if in_stock and last_status != "in":
-            notify_discord(product_name, url)
-            print("ALERTE envoyée:", product_name)
+        # Créer une tâche pour chaque produit
+        for url in PRODUCT_URLS:
+            url = url.strip()
+            if url:
+                tasks.append(process_url(url))
 
-        # Mettre à jour l'état
-        state[url] = "in" if in_stock else "out"
+        # Exécuter toutes les tâches en parallèle
+        await asyncio.gather(*tasks)
+        await browser.close()
 
+    # Sauvegarder l'état pour éviter le spam
     save_state(state)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
