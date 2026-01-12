@@ -10,7 +10,7 @@ PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")
 STATE_FILE = "stock_state.json"
 PAGE_TIMEOUT = 40000  # 40s max pour que la page charge
 MAX_RETRIES = 2
-OUT_TEXTS = ["Rupture de stock", "Indisponible", "En réassort"]
+OUT_TEXTS = ["Rupture de stock", "En réassort"]
 
 # --- Fonctions ---
 def load_state():
