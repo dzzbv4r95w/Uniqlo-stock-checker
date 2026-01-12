@@ -4,12 +4,13 @@ import asyncio
 from playwright.async_api import async_playwright
 import requests
 
-# --- Configuration ---
+# --- Config ---
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 PRODUCT_URLS = os.environ["PRODUCT_URLS"].split(",")
 STATE_FILE = "stock_state.json"
-PAGE_TIMEOUT = 20000  # 20s max par page
-MAX_RETRIES = 2       # Nombre de tentatives par produit
+PAGE_TIMEOUT = 40000  # 40s max pour que la page charge
+MAX_RETRIES = 2
+OUT_TEXTS = ["Rupture de stock", "Indisponible", "En réassort"]
 
 # --- Fonctions ---
 def load_state():
@@ -24,9 +25,7 @@ def save_state(state):
         json.dump(state, f)
 
 def notify_discord(product_name, url):
-    message = {
-        "content": f"🚨 **IN STOCK!**\nProduit: **{product_name}**\n{url}"
-    }
+    message = {"content": f"🚨 **IN STOCK!**\nProduit: **{product_name}**\n{url}"}
     try:
         requests.post(DISCORD_WEBHOOK, json=message, timeout=10)
     except Exception as e:
@@ -39,17 +38,27 @@ async def check_product(page, url):
     for attempt in range(MAX_RETRIES):
         try:
             print(f"→ Tentative {attempt+1} pour {url}")
-            await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
-            
-            # Nom du produit
+            # Attendre que tout le JS charge
+            await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="networkidle")
+            await asyncio.sleep(2)  # laisser le JS injecter le DOM final
+
+            # Nom produit
             h1 = await page.query_selector("h1")
             if h1:
                 product_name = (await h1.inner_text()).strip()
-            print(f"Produit détecté: {product_name}")
+            else:
+                print(f"⚠ h1 non trouvé pour {url}, considéré hors stock")
+                return product_name, False
 
-            # Vérifier si "Rupture de stock" est présent
-            body_text = await page.inner_text("body")
-            if "Rupture de stock" in body_text:
+            # Zone produit spécifique
+            stock_div = await page.query_selector(".product-info, .product-detail")
+            stock_text = (await stock_div.inner_text()).strip() if stock_div else ""
+            if not stock_div:
+                print(f"⚠ div stock non trouvé pour {url}, body utilisé")
+                stock_text = await page.inner_text("body")
+
+            # Vérification OUT_TEXTS
+            if any(txt in stock_text for txt in OUT_TEXTS):
                 in_stock = False
                 print(f"{product_name} : Hors stock")
             else:
