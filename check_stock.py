@@ -10,9 +10,9 @@ PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
 PAGE_TIMEOUT = 30000  
 
-# Target Keywords (Playwright locators handle casing automatically)
-IN_STOCK_TEXT = "ajouter au panier"
-FALSE_ALARM_TEXT = "de nouveau en stock"  
+# Master Stock Identifiers (Order matters)
+IN_STOCK_KEYWORD = "ajouter au panier"
+OUT_OF_STOCK_KEYWORDS = ["de nouveau en stock", "indisponible", "rupture de stock", "épuisé"]
 # =======================================================
 
 def load_state():
@@ -55,54 +55,58 @@ async def check_product(page, url):
     try:
         print(f"→ Connexion en cours: {url}")
         
-        # Open page structure
+        # Pull initial page elements
         await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="commit")
         
-        # Give Uniqlo's system 8 seconds to resolve the size/color query params
+        # Give Uniqlo's background API 8 seconds to process variant codes
         await page.wait_for_timeout(8000)
         
-        # Capture the product name
+        # Capture product name
         h1 = await page.query_selector("h1")
         if h1:
             product_name = (await h1.inner_text()).strip()
             
-        # LIVE LOG DEBUGGER: Scan and print all button strings to your GitHub action logs
-        # This allows you to witness exactly what the bot sees inside the Shadow DOMs.
+        # Target all buttons sequentially from top to bottom
         all_buttons = page.locator("button")
         btn_count = await all_buttons.count()
-        print(f"   [Debug] Found {btn_count} buttons inside page layout:")
         
+        main_button_text = None
+        all_keywords = [IN_STOCK_KEYWORD] + OUT_OF_STOCK_KEYWORDS
+        
+        # Find the very FIRST button matching any stock keyword (This is the primary CTA)
         for i in range(btn_count):
             try:
                 btn_text = await all_buttons.nth(i).inner_text()
-                cleaned_btn_text = " ".join(btn_text.lower().split())
-                if cleaned_btn_text:
-                    print(f"     - Button {i}: '{cleaned_btn_text}'")
+                cleaned_text = " ".join(btn_text.lower().split())
+                if any(kw in cleaned_text for kw in all_keywords):
+                    main_button_text = cleaned_text
+                    print(f"   [Found CTA] Primary button identified: '{cleaned_text}'")
+                    break
             except:
                 pass
 
-        # SHADOW-PIERCING DETECTION ENGINE
-        # We use .get_by_text() because it natively penetrates web components and shadow roots
-        has_false_alarm_btn = await page.get_by_text(FALSE_ALARM_TEXT, exact=False).count() > 0
-        has_buy_btn = await page.get_by_text(IN_STOCK_TEXT, exact=False).count() > 0
-        
-        print(f"   [Diagnostic] False Alarm Match: {has_false_alarm_btn} | True Buy Button Match: {has_buy_btn}")
-        
-        # UNIQLO CRITICAL LOGIC
-        # Rule 1: If "de nouveau en stock" penetrates any component, the main variant is definitely sold out.
-        if has_false_alarm_btn:
-            in_stock = False
-            print(f"🔴 {product_name} : Hors stock (Bouton d'alerte mail actif)")
-            
-        # Rule 2: If the email alert button is missing but "ajouter au panier" is found, it's open for purchase.
-        elif has_buy_btn:
+        # UNIQLO FINAL EVALUATION LOGIC
+        if main_button_text == IN_STOCK_KEYWORD:
             in_stock = True
             print(f"🟢 {product_name} : EN STOCK 🎉")
             
-        # Rule 3: Safety backup
-        else:
+        elif main_button_text in OUT_OF_STOCK_KEYWORDS:
             in_stock = False
-            print(f"🔴 {product_name} : Hors stock (Bouton d'achat introuvable)")
+            print(f"🔴 {product_name} : Hors stock ({main_button_text})")
+            
+        elif main_button_text and any(kw in main_button_text for kw in OUT_OF_STOCK_KEYWORDS):
+            in_stock = False
+            print(f"🔴 {product_name} : Hors stock ({main_button_text})")
+            
+        else:
+            # Fallback to page inspection if button layout failed to load
+            body_text = (await page.inner_text("body")).lower()
+            if IN_STOCK_KEYWORD in body_text and not any(out in body_text for out in OUT_OF_STOCK_KEYWORDS):
+                in_stock = True
+                print(f"🟢 {product_name} : EN STOCK (Fallback Detection)")
+            else:
+                in_stock = False
+                print(f"🔴 {product_name} : Hors stock (Bouton principal introuvable/inactif)")
             
     except Exception as e:
         print(f"❌ Erreur ou Timeout pour {url}: {e}")
@@ -138,13 +142,13 @@ async def main():
                 timezone_id="Europe/Brussels"
             )
             
-            # Mask automated browser environment signatures
             await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            
             page = await context.new_page()
+            
             product_name, in_stock = await check_product(page, url)
             last_state = state.get(url, {}).get("in_stock", False)
             
+            # Trigger notification only on a clean state switch
             if in_stock and not last_state:
                 notify_discord(product_name, url)
                 print(f"🔔 Notification envoyée pour {product_name} !")
