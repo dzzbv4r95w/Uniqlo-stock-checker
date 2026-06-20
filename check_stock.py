@@ -8,11 +8,11 @@ import requests
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
-PAGE_TIMEOUT = 30000  # 30 seconds max loading buffer
+PAGE_TIMEOUT = 30000  
 
-# Target Keywords (Keep everything lowercase for safe matching)
+# Target Keywords (Lowercase)
 IN_STOCK_TEXT = "ajouter au panier"
-FALSE_ALARM_TEXT = "de nouveau en stock"  # This means 'Notify me when back in stock' -> SOLD OUT
+FALSE_ALARM_TEXT = "de nouveau en stock"  
 # =======================================================
 
 def load_state():
@@ -23,7 +23,6 @@ def load_state():
                 return {}
             return json.loads(content)
     except (FileNotFoundError, json.JSONDecodeError):
-        # Automatically heals empty or corrupted state files
         print(f"ℹ️ {STATE_FILE} missing or blank. Starting fresh tracking history.")
         return {}
 
@@ -56,33 +55,31 @@ async def check_product(page, url):
     try:
         print(f"→ Connexion en cours: {url}")
         
-        # Load the page layout structure first
-        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="load")
+        # ANTI-BOT FIX 1: Use "commit". This forces Playwright to proceed the millisecond 
+        # the page server responds, completely bypassing stuck images, tracking pixels, or CDN delays.
+        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="commit")
         
-        # CRITICAL FIX: Uniqlo loads inventory data slowly via background APIs.
-        # We hold the browser open for 6 full seconds to let the real variant button render.
-        await page.wait_for_timeout(6000)
+        # ANTI-BOT FIX 2: Give the JavaScript a generous 8 seconds to build the interface 
+        # locally inside the virtual runner container.
+        await page.wait_for_timeout(8000)
         
         # Capture the product name
         h1 = await page.query_selector("h1")
         if h1:
             product_name = (await h1.inner_text()).strip()
             
-        # Extract whole page layout text and lowercase it
+        # Extract whole page text
         body_text_lowercase = (await page.inner_text("body")).lower()
         
-        # UNIQLO-SPECIFIC LOGIC ENGINE
-        # Rule 1: If the email alert alert button "de nouveau en stock" exists, it is definitively SOLD OUT.
+        # UNIQLO DETECTION LOGIC
         if FALSE_ALARM_TEXT in body_text_lowercase:
             in_stock = False
             print(f"🔴 {product_name} : Hors stock (Bouton d'alerte mail détecté)")
             
-        # Rule 2: If the alert button is gone and the buy button is visible, it is IN STOCK.
         elif IN_STOCK_TEXT in body_text_lowercase:
             in_stock = True
             print(f"🟢 {product_name} : EN STOCK 🎉")
             
-        # Rule 3: Safety net fallback if neither text pattern resolves
         else:
             in_stock = False
             print(f"🔴 {product_name} : Hors stock (Bouton d'achat invisible)")
@@ -95,29 +92,42 @@ async def check_product(page, url):
 
 async def main():
     state = load_state()
-    
-    # Clean up white space and eliminate empty lines from the secret link array
     urls_to_check = [url.strip() for url in PRODUCT_URLS if url.strip()]
     if not urls_to_check:
         print("❌ Error: No product URLs found inside your PRODUCT_URLS secret.")
         return
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # ANTI-BOT FIX 3: Inject launch arguments to strip away automated bot signatures 
+        # that trigger e-commerce CDN firewalls.
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-position=0,0",
+                "--ignore-certificate-errors"
+            ]
+        )
         tasks = []
         
         async def process_url(url):
-            # Create a clean isolated desktop session with standard browser dimensions
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+                locale="fr-BE",
+                timezone_id="Europe/Brussels"
             )
-            page = await context.new_page()
             
+            # ANTI-BOT FIX 4: Hide Webdriver presence evaluation properties
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            page = await context.new_page()
             product_name, in_stock = await check_product(page, url)
             last_state = state.get(url, {}).get("in_stock", False)
             
-            # Fire Discord notification only on a fresh transition to in-stock
             if in_stock and not last_state:
                 notify_discord(product_name, url)
                 
@@ -127,7 +137,6 @@ async def main():
         for url in urls_to_check:
             tasks.append(process_url(url))
             
-        # Execute checks for all links simultaneously in parallel paths
         await asyncio.gather(*tasks)
         await browser.close()
         
