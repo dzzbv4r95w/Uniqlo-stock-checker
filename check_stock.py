@@ -8,24 +8,23 @@ import requests
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
-PAGE_TIMEOUT = 30000  # 30 seconds maximum for heavy loading pages
+PAGE_TIMEOUT = 30000  # 30 seconds max loading buffer
 
-# Target Keywords (Keep everything lowercase for case-insensitive matching)
-IN_STOCK_TEXTS = ["ajouter au panier"]
-OUT_TEXTS = ["rupture de stock", "indisponible", "en réassort", "épuisé"]
+# Target Keywords (Keep everything lowercase for safe matching)
+IN_STOCK_TEXT = "ajouter au panier"
+FALSE_ALARM_TEXT = "de nouveau en stock"  # This means 'Notify me when back in stock' -> SOLD OUT
 # =======================================================
 
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
             content = f.read().strip()
-            if not content:  # If the file exists but is completely empty
+            if not content:  
                 return {}
             return json.loads(content)
     except (FileNotFoundError, json.JSONDecodeError):
-        # Captures missing files OR invisible character spacing bugs.
-        # Returns a clean dictionary to let the script run safely.
-        print(f"ℹ️ {STATE_FILE} missing or unreadable. Generating a fresh state history.")
+        # Automatically heals empty or corrupted state files
+        print(f"ℹ️ {STATE_FILE} missing or blank. Starting fresh tracking history.")
         return {}
 
 def save_state(state):
@@ -43,8 +42,8 @@ def notify_discord(product_name, url):
     message = {"content": f"🚨 **UNIQLO IN STOCK!** 🚨\nProduit: **{product_name}**\nLien: {url}"}
     try:
         response = requests.post(DISCORD_WEBHOOK, json=message, timeout=10)
-        if response.status_code == 204 or response.status_code == 200:
-            print(f"📡 Discord notification successfully sent for: {product_name}")
+        if response.status_code in [200, 204]:
+            print(f"📡 Discord notification sent for: {product_name}")
         else:
             print(f"⚠ Discord returned status code: {response.status_code}")
     except Exception as e:
@@ -57,35 +56,36 @@ async def check_product(page, url):
     try:
         print(f"→ Connexion en cours: {url}")
         
-        # 1. Wait until network activity settles
-        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="networkidle")
+        # Load the page layout structure first
+        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="load")
         
-        # 2. Hard pause for 2 seconds to let the Uniqlo React engines completely swap out the placeholders
-        await page.wait_for_timeout(2000)
+        # CRITICAL FIX: Uniqlo loads inventory data slowly via background APIs.
+        # We hold the browser open for 6 full seconds to let the real variant button render.
+        await page.wait_for_timeout(6000)
         
-        # Extract product name
+        # Capture the product name
         h1 = await page.query_selector("h1")
         if h1:
             product_name = (await h1.inner_text()).strip()
             
-        # Extract whole page text and convert to lowercase for total case insensitivity
+        # Extract whole page layout text and lowercase it
         body_text_lowercase = (await page.inner_text("body")).lower()
         
-        # 3. ADVANCED VERIFICATION LOGIC
-        # Priority 1: If "Ajouter au panier" is visible, the buy button is active!
-        if any(in_txt in body_text_lowercase for in_txt in IN_STOCK_TEXTS):
-            in_stock = True
-            print(f"🟢 {product_name} : EN STOCK")
-            
-        # Priority 2: If buy text is missing and out-of-stock signals are explicitly caught
-        elif any(out_txt in body_text_lowercase for out_txt in OUT_TEXTS):
+        # UNIQLO-SPECIFIC LOGIC ENGINE
+        # Rule 1: If the email alert alert button "de nouveau en stock" exists, it is definitively SOLD OUT.
+        if FALSE_ALARM_TEXT in body_text_lowercase:
             in_stock = False
-            print(f"🔴 {product_name} : Hors stock")
+            print(f"🔴 {product_name} : Hors stock (Bouton d'alerte mail détecté)")
             
-        # Priority 3: Fallback safety if the site structure changes unexpectedly
+        # Rule 2: If the alert button is gone and the buy button is visible, it is IN STOCK.
+        elif IN_STOCK_TEXT in body_text_lowercase:
+            in_stock = True
+            print(f"🟢 {product_name} : EN STOCK 🎉")
+            
+        # Rule 3: Safety net fallback if neither text pattern resolves
         else:
             in_stock = False
-            print(f"⚠ {product_name} : Impossible de lire le stock de manière définitive (Par sécurité: traité comme hors stock)")
+            print(f"🔴 {product_name} : Hors stock (Bouton d'achat invisible)")
             
     except Exception as e:
         print(f"❌ Erreur ou Timeout pour {url}: {e}")
@@ -96,19 +96,18 @@ async def check_product(page, url):
 async def main():
     state = load_state()
     
-    # Filter empty elements from product strings list
+    # Clean up white space and eliminate empty lines from the secret link array
     urls_to_check = [url.strip() for url in PRODUCT_URLS if url.strip()]
     if not urls_to_check:
-        print("❌ Error: No product URLs detected in your PRODUCT_URLS repository secret.")
+        print("❌ Error: No product URLs found inside your PRODUCT_URLS secret.")
         return
 
     async with async_playwright() as p:
-        # Launch browser without typical bot indicators
         browser = await p.chromium.launch(headless=True)
         tasks = []
         
         async def process_url(url):
-            # Isolate cookies and assign a clean Google Chrome user profile
+            # Create a clean isolated desktop session with standard browser dimensions
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
@@ -118,7 +117,7 @@ async def main():
             product_name, in_stock = await check_product(page, url)
             last_state = state.get(url, {}).get("in_stock", False)
             
-            # Send notification ONLY if state switches from False (or None) to True
+            # Fire Discord notification only on a fresh transition to in-stock
             if in_stock and not last_state:
                 notify_discord(product_name, url)
                 
@@ -128,7 +127,7 @@ async def main():
         for url in urls_to_check:
             tasks.append(process_url(url))
             
-        # Execute checks simultaneously in parallel loops
+        # Execute checks for all links simultaneously in parallel paths
         await asyncio.gather(*tasks)
         await browser.close()
         
