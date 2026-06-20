@@ -10,9 +10,9 @@ PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
 PAGE_TIMEOUT = 30000  
 
-# Target Keywords (Keep lowercase, spaces will be normalized automatically)
+# Target Keywords (Playwright locators handle casing automatically)
 IN_STOCK_TEXT = "ajouter au panier"
-FALSE_ALARM_TEXT = "de nouveau en stock"  # Email alert button text = SOLD OUT
+FALSE_ALARM_TEXT = "de nouveau en stock"  
 # =======================================================
 
 def load_state():
@@ -58,8 +58,7 @@ async def check_product(page, url):
         # Open page structure
         await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="commit")
         
-        # CRITICAL FIX: Give Uniqlo's system 8 full seconds to process your URL parameters 
-        # (size/color codes) and swap the default interface out for the true availability data.
+        # Give Uniqlo's system 8 seconds to resolve the size/color query params
         await page.wait_for_timeout(8000)
         
         # Capture the product name
@@ -67,30 +66,40 @@ async def check_product(page, url):
         if h1:
             product_name = (await h1.inner_text()).strip()
             
-        # Extract page layout text
-        raw_body_text = await page.inner_text("body")
+        # LIVE LOG DEBUGGER: Scan and print all button strings to your GitHub action logs
+        # This allows you to witness exactly what the bot sees inside the Shadow DOMs.
+        all_buttons = page.locator("button")
+        btn_count = await all_buttons.count()
+        print(f"   [Debug] Found {btn_count} buttons inside page layout:")
         
-        # TEXT NORMALIZATION FIX: This strips out hidden elements, newlines (\n), and 
-        # complex HTML non-breaking spaces (\xa0 / &nbsp;), turning everything into clean single spaces.
-        body_text_clean = " ".join(raw_body_text.lower().split())
+        for i in range(btn_count):
+            try:
+                btn_text = await all_buttons.nth(i).inner_text()
+                cleaned_btn_text = " ".join(btn_text.lower().split())
+                if cleaned_btn_text:
+                    print(f"     - Button {i}: '{cleaned_btn_text}'")
+            except:
+                pass
+
+        # SHADOW-PIERCING DETECTION ENGINE
+        # We use .get_by_text() because it natively penetrates web components and shadow roots
+        has_false_alarm_btn = await page.get_by_text(FALSE_ALARM_TEXT, exact=False).count() > 0
+        has_buy_btn = await page.get_by_text(IN_STOCK_TEXT, exact=False).count() > 0
         
-        # Live diagnostic logs inside your GitHub terminal
-        has_false_alarm_btn = FALSE_ALARM_TEXT in body_text_clean
-        has_buy_btn = IN_STOCK_TEXT in body_text_clean
-        print(f"   [Diagnostic] Alerte mail détectée ? {has_false_alarm_btn} | Bouton d'achat détecté ? {has_buy_btn}")
+        print(f"   [Diagnostic] False Alarm Match: {has_false_alarm_btn} | True Buy Button Match: {has_buy_btn}")
         
-        # UNIQLO CRITICAL LOGIC ENGINE
-        # Rule 1: If "de nouveau en stock" is anywhere on the page, the main variant is definitively out of stock.
+        # UNIQLO CRITICAL LOGIC
+        # Rule 1: If "de nouveau en stock" penetrates any component, the main variant is definitely sold out.
         if has_false_alarm_btn:
             in_stock = False
             print(f"🔴 {product_name} : Hors stock (Bouton d'alerte mail actif)")
             
-        # Rule 2: If the email alert button is missing but the buy text is found, it's open for purchase!
+        # Rule 2: If the email alert button is missing but "ajouter au panier" is found, it's open for purchase.
         elif has_buy_btn:
             in_stock = True
             print(f"🟢 {product_name} : EN STOCK 🎉")
             
-        # Rule 3: Backup safety switch
+        # Rule 3: Safety backup
         else:
             in_stock = False
             print(f"🔴 {product_name} : Hors stock (Bouton d'achat introuvable)")
@@ -129,7 +138,7 @@ async def main():
                 timezone_id="Europe/Brussels"
             )
             
-            # Mask automated web automation presence
+            # Mask automated browser environment signatures
             await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
             page = await context.new_page()
