@@ -8,9 +8,9 @@ import requests
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
-PAGE_TIMEOUT = 30000  
+PAGE_TIMEOUT = 30000  # 30 seconds max loading buffer
 
-# Master Stock Identifiers (Order matters)
+# Master Stock Identifiers (Exact text matches for primary CTA)
 IN_STOCK_KEYWORD = "ajouter au panier"
 OUT_OF_STOCK_KEYWORDS = ["de nouveau en stock", "indisponible", "rupture de stock", "épuisé"]
 # =======================================================
@@ -55,10 +55,10 @@ async def check_product(page, url):
     try:
         print(f"→ Connexion en cours: {url}")
         
-        # Pull initial page elements
+        # Pull initial page elements instantly
         await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="commit")
         
-        # Give Uniqlo's background API 8 seconds to process variant codes
+        # Give Uniqlo's background API 8 seconds to process variant codes (size/color)
         await page.wait_for_timeout(8000)
         
         # Capture product name
@@ -71,16 +71,18 @@ async def check_product(page, url):
         btn_count = await all_buttons.count()
         
         main_button_text = None
-        all_keywords = [IN_STOCK_KEYWORD] + OUT_OF_STOCK_KEYWORDS
+        target_keywords = [IN_STOCK_KEYWORD] + OUT_OF_STOCK_KEYWORDS
         
-        # Find the very FIRST button matching any stock keyword (This is the primary CTA)
+        # Find the very FIRST button that matches a key stock action string
         for i in range(btn_count):
             try:
                 btn_text = await all_buttons.nth(i).inner_text()
                 cleaned_text = " ".join(btn_text.lower().split())
-                if any(kw in cleaned_text for kw in all_keywords):
+                
+                # CRITICAL IMPROVEMENT: Check for strict matching so marketing banners don't cause false alarms
+                if cleaned_text == IN_STOCK_KEYWORD or cleaned_text in OUT_OF_STOCK_KEYWORDS:
                     main_button_text = cleaned_text
-                    print(f"   [Found CTA] Primary button identified: '{cleaned_text}'")
+                    print(f"   [Found CTA] Primary action button identified: '{cleaned_text}'")
                     break
             except:
                 pass
@@ -94,12 +96,8 @@ async def check_product(page, url):
             in_stock = False
             print(f"🔴 {product_name} : Hors stock ({main_button_text})")
             
-        elif main_button_text and any(kw in main_button_text for kw in OUT_OF_STOCK_KEYWORDS):
-            in_stock = False
-            print(f"🔴 {product_name} : Hors stock ({main_button_text})")
-            
         else:
-            # Fallback to page inspection if button layout failed to load
+            # Fallback scan if layout structure renders oddly
             body_text = (await page.inner_text("body")).lower()
             if IN_STOCK_KEYWORD in body_text and not any(out in body_text for out in OUT_OF_STOCK_KEYWORDS):
                 in_stock = True
