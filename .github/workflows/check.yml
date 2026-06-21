@@ -9,7 +9,7 @@ jobs:
   check-stock:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # CRITICAL FIX: Explicitly grants permission to push changes back to your repository
+      contents: write       # Grants cloud runner permissions to write back to repo files
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
