@@ -3,11 +3,13 @@ name: Uniqlo Stock Checker
 on:
   schedule:
     - cron: '*/15 * * * *'  # Automatically runs every 15 minutes on autopilot
-  workflow_dispatch:        # CRITICAL: This line forces the manual "Run workflow" button to appear!
+  workflow_dispatch:        # Forces the manual "Run workflow" button to appear
 
 jobs:
   check-stock:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # CRITICAL FIX: Explicitly grants permission to push changes back to your repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
