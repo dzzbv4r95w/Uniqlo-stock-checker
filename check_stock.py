@@ -41,53 +41,71 @@ def notify_discord(product_name, url):
     except Exception as e:
         print("❌ Failed to reach Discord API:", e)
 
-def check_product_api(url):
-    # Extract structural code parameters directly from the Uniqlo Belgium URL
-    prod_match = re.search(r"products/(E\d+-\d+)", url)
+def query_uniqlo_api(session, market, product_id):
+    """Helper function to execute direct endpoint requests across market regions"""
+    api_url = f"https://www.uniqlo.com/front/api/v1/{market}/product/{product_id}/basic"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "fr-BE,fr;q=0.9"
+    }
+    try:
+        response = session.get(api_url, headers=headers, timeout=15)
+        return response
+    except Exception:
+        return None
+
+def check_product_api(session, url):
+    # FIXED: Extract ONLY the 6-digit numerical ID expected by Uniqlo's database API
+    prod_match = re.search(r"products/E?(\d+)", url)
     if not prod_match:
-        print(f"❌ Could not parse valid Uniqlo product ID from URL: {url}")
+        print(f"❌ Could not parse a valid numerical Uniqlo ID from link: {url}")
         return "Produit inconnu", False
         
-    product_id = prod_match.group(1)
+    clean_id = prod_match.group(1)
+    
+    # Extract specific target tracking constraints from the URL string parameters
     target_color = re.search(r"colorDisplayCode=(\d+)", url)
     target_size = re.search(r"sizeDisplayCode=(\d+)", url)
     
     color_code = target_color.group(1) if target_color else None
     size_code = target_size.group(1) if target_size else None
     
-    # Connect directly to Uniqlo Europe's production data gateway
-    api_url = f"https://www.uniqlo.com/front/api/v1/be/product/{product_id}/basic"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
+    print(f"→ Extraction: ID {clean_id} | Couleur ciblée: {color_code} | Taille ciblée: {size_code}")
     
+    # Executing multi-market pivot checks to avoid region-lock 404s
+    response = query_uniqlo_api(session, "be", clean_id)
+    
+    if response is None or response.status_code == 404:
+        print(f"   [Pivot] Node 'be' returned 404. Attempting fallback query on regional node 'eu'...")
+        response = query_uniqlo_api(session, "eu", clean_id)
+        
+    if response is None or response.status_code != 200:
+        status_code = response.status_code if response else "Timeout"
+        print(f"❌ Uniqlo API rejected requests for product ID {clean_id} (Code: {status_code})")
+        return "Produit inconnu", False
+        
     try:
-        response = requests.get(api_url, headers=headers, timeout=15)
-        if response.status_code != 200:
-            print(f"❌ Uniqlo API returned error code {response.status_code} for item {product_id}")
-            return "Produit inconnu", False
-            
         data = response.json()
         product_data = data.get("result", {}).get("product", {})
         if not product_data and "result" in data:
             product_data = data["result"]
             
         if not isinstance(product_data, dict):
-            print(f"❌ Unexpected API data format returned for {product_id}")
+            print(f"❌ Malformed response payload schema received for ID {clean_id}")
             return "Produit inconnu", False
             
-        product_name = product_data.get("name", product_data.get("title", "Produit Uniqlo")).strip()
+        product_name = product_data.get("name", product_data.get("title", f"Produit Uniqlo {clean_id}")).strip()
         variants = product_data.get("l1s", product_data.get("items", []))
         
         if not variants:
-            print(f"⚠ No specific item variations found for {product_id}")
+            print(f"⚠ Database response contains empty variant arrays for ID {clean_id}")
             return product_name, False
             
         in_stock = False
         matched_variants_checked = 0
         
-        # Evaluate variant objects against your exact size/color configurations
+        # Walk the multi-dimensional database matrix evaluating stock metrics
         for item in variants:
             if not isinstance(item, dict):
                 continue
@@ -95,7 +113,7 @@ def check_product_api(url):
             item_color = str(item.get("colorCode", item.get("color", "")))
             item_size = str(item.get("sizeCode", item.get("size", "")))
             
-            # Check availability metrics safely
+            # Extract stock metrics and check status flags safely
             stock_qty = item.get("stock", item.get("quantity", item.get("qty", 0)))
             is_salable = item.get("salable", item.get("available", True))
             
@@ -110,7 +128,7 @@ def check_product_api(url):
                 
             variant_available = has_stock and is_salable
             
-            # Filter checks
+            # Filter checks based on link parameters
             match_color = (color_code is None) or (item_color == color_code)
             match_size = (size_code is None) or (item_size == size_code)
             
@@ -120,20 +138,22 @@ def check_product_api(url):
                     in_stock = True
                     break
                     
-        # Backup: If URL query filters didn't match the API codes, check overall catalog inventory
+        # General Fallback: If URL filter codes didn't align, verify overall layout status
         if matched_variants_checked == 0 and variants:
             for item in variants:
-                if isinstance(item, dict) and int(item.get("stock", 0)) > 0:
-                    in_stock = True
-                    break
+                if isinstance(item, dict):
+                    qty = item.get("stock", item.get("quantity", 0))
+                    if isinstance(qty, (int, float)) and qty > 0:
+                        in_stock = True
+                        break
                     
         emoji = "🟢" if in_stock else "🔴"
         status_text = "EN STOCK 🎉" if in_stock else "Hors stock"
-        print(f"{emoji} {product_name} ({product_id}) : {status_text}")
+        print(f"{emoji} {product_name} ({clean_id}) : {status_text}")
         return product_name, in_stock
         
     except Exception as e:
-        print(f"❌ Failed to parse backend feeds for {product_id}: {e}")
+        print(f"❌ Exception occurred parsing inventory streams for ID {clean_id}: {e}")
         return "Produit inconnu", False
 
 def main():
@@ -143,18 +163,20 @@ def main():
         print("❌ Error: No product URLs found inside your PRODUCT_URLS secret.")
         return
 
-    for url in urls_to_check:
-        product_name, in_stock = check_product_api(url)
-        last_state = state.get(url, {}).get("in_stock", False)
-        
-        if in_stock and not last_state:
-            notify_discord(product_name, url)
-            print(f"🔔 Notification payload sent for {product_name}!")
+    # Use a persistent network session to bypass Akamai rate-limiting blocks
+    with requests.Session() as session:
+        for url in urls_to_check:
+            product_name, in_stock = check_product_api(session, url)
+            last_state = state.get(url, {}).get("in_stock", False)
             
-        state[url] = {"in_stock": in_stock, "product_name": product_name}
+            if in_stock and not last_state:
+                notify_discord(product_name, url)
+                print(f"🔔 Restock notification dispatched for {product_name}!")
+                
+            state[url] = {"in_stock": in_stock, "product_name": product_name}
         
     save_state(state)
-    print("✅ System verification run completed.")
+    print("✅ System verification run completed successfully.")
 
 if __name__ == "__main__":
     main()
