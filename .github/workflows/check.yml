@@ -1,30 +1,15 @@
-name: Uniqlo Stock Checker
-
-on:
-  schedule:
-    - cron: "0,30 * * * *"  # toutes les 30 minutes
-  workflow_dispatch:
-
-# CRITICAL FIX 1: Grant permissions so the runner can save your JSON state file back to GitHub
-permissions:
-  contents: write
-
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          pip install playwright requests
-          # CRITICAL FIX 2: Install ONLY Chromium and its required Linux OS libraries
-          playwright install chromium --with-deps
+          pip install requests
 
       - name: Run stock checker
         env:
@@ -32,14 +17,10 @@ jobs:
           PRODUCT_URLS: ${{ secrets.PRODUCT_URLS }}
         run: python check_stock.py
 
-      # CRITICAL FIX 3: Push stock_state.json back to the repo so it remembers history
       - name: Save state back to repository
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          if [ -f stock_state.json ]; then
-            git add stock_state.json
-            # Only commit if the file actually changed (prevents empty commit errors)
-            git diff-index --quiet HEAD || (git commit -m "chore: update stock state [skip ci]" && git push)
-          fi
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add stock_state.json
+          git commit -m "Automated inventory update" || exit 0
+          git push
