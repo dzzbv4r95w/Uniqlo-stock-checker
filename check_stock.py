@@ -8,7 +8,7 @@ import requests
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
 PRODUCT_URLS = os.environ.get("PRODUCT_URLS", "").split(",")
 STATE_FILE = "stock_state.json"
-PAGE_TIMEOUT = 45000  # 45-second extended load limit for cloud actions
+PAGE_TIMEOUT = 15000  # Cut off hanging threads after 15 seconds max
 
 IN_STOCK_KEYWORD = "ajouter au panier"
 OUT_OF_STOCK_KEYWORDS = ["de nouveau en stock", "indisponible", "rupture de stock", "épuisé"]
@@ -54,25 +54,35 @@ async def check_product(page, url):
     try:
         print(f"→ Connexion en cours: {url}")
         
-        # Navigate using Playwright to handle Akamai firewall clearance
-        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="commit")
+        # Pull layout structure instantly
+        await page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
         
-        # Give Uniqlo Belgium's scripts 8 seconds to process selected sizes/colors
-        await page.wait_for_timeout(8000)
+        # Give Uniqlo Belgium's system 7 seconds to resolve size/color variant parameters
+        await page.wait_for_timeout(7000)
         
         # Capture product name
         h1 = await page.query_selector("h1")
         if h1:
             product_name = (await h1.inner_text()).strip()
             
-        # Target all page buttons sequentially from top to bottom
-        all_buttons = page.locator("button")
+        # DUAL-LAYER FIX 1: Lock onto Uniqlo's primary checkout block container
+        buybox = None
+        for selector in ["div.fr-pdp-controls", "div[class*='pdp-controls']", "div.product-form", "section[class*='product-order']"]:
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible():
+                buybox = loc
+                print(f"   [Container Scope] Locked onto control panel: '{selector}'")
+                break
+                
+        # Fall back to page context if layout wrapper shifts dynamically
+        search_scope = buybox if buybox else page
+        all_buttons = search_scope.locator("button")
         btn_count = await all_buttons.count()
         
         primary_cta_text = None
         all_keywords = [IN_STOCK_KEYWORD] + OUT_OF_STOCK_KEYWORDS
         
-        # Look for the absolute FIRST interactive button containing our stock phrases
+        # Evaluate primary block items sequentially
         for i in range(btn_count):
             try:
                 btn = all_buttons.nth(i)
@@ -80,15 +90,24 @@ async def check_product(page, url):
                     btn_text = await btn.inner_text()
                     cleaned_text = " ".join(btn_text.lower().split())
                     
-                    # Substring match captures buttons even if they include prices or metadata
                     if any(kw in cleaned_text for kw in all_keywords):
-                        primary_cta_text = cleaned_text
-                        print(f"   [Primary CTA Found] Button content: '{cleaned_text}'")
-                        break  # Stopped at index 0 primary panel, ignoring bottom carousels
+                        # DUAL-LAYER FIX 2: Validate buy button execution status attributes
+                        if IN_STOCK_KEYWORD in cleaned_text:
+                            if await btn.is_enabled():
+                                primary_cta_text = cleaned_text
+                                print(f"   [Active CTA] Buy button is fully active: '{cleaned_text}'")
+                                break
+                            else:
+                                print(f"   [Disabled CTA] Found buy button text, but it is grayed out/disabled by Uniqlo.")
+                        else:
+                            # Direct out-of-stock button match (like an enabled 'De nouveau en stock' email notifier)
+                            primary_cta_text = cleaned_text
+                            print(f"   [Active CTA] Out-of-stock indicator active: '{cleaned_text}'")
+                            break
             except:
                 pass
 
-        # Inventory Decision Engine
+        # Final Evaluation Tree
         if primary_cta_text and IN_STOCK_KEYWORD in primary_cta_text:
             in_stock = True
             print(f"🟢 {product_name} : EN STOCK 🎉")
@@ -96,21 +115,20 @@ async def check_product(page, url):
             in_stock = False
             print(f"🔴 {product_name} : Hors stock ({primary_cta_text})")
         else:
-            # Emergency fallback: Scope search exclusively to Uniqlo's primary control panel class
-            print("   [Fallback] Analyzing main layout panel modules directly...")
-            panel = page.locator("div.fr-pdp-controls, div[class*='pdp-controls']").first
-            if await panel.count() and any(out in (await panel.inner_text()).lower() for out in OUT_OF_STOCK_KEYWORDS):
+            # Emergency layout panel string fallbacks
+            panel_text = (await buybox.inner_text()).lower() if buybox else (await page.inner_text("body")).lower()
+            if any(out in panel_text for out in OUT_OF_STOCK_KEYWORDS):
                 in_stock = False
-                print(f"🔴 {product_name} : Hors stock (Panel Match)")
-            elif panel and IN_STOCK_KEYWORD in (await panel.inner_text()).lower():
+                print(f"🔴 {product_name} : Hors stock (Panel String Guard)")
+            elif IN_STOCK_KEYWORD in panel_text and buybox:
                 in_stock = True
-                print(f"🟢 {product_name} : EN STOCK 🎉 (Panel Match)")
+                print(f"🟢 {product_name} : EN STOCK 🎉 (Panel String Guard)")
             else:
                 in_stock = False
-                print(f"🔴 {product_name} : Hors stock (No explicit CTA isolated)")
+                print(f"🔴 {product_name} : Hors stock (No active checkout paths verified)")
             
     except Exception as e:
-        print(f"❌ Erreur ou Timeout pour {url}: {e}")
+        print(f"❌ Timeout ou restriction réseau sur {url}")
         in_stock = False
         
     return product_name, in_stock
@@ -134,8 +152,8 @@ async def main():
             ]
         )
         
-        # Process items sequentially to avoid heavy multi-browser crashes on standard cloud nodes
-        for url in urls_to_check:
+        tasks = []
+        async def process_url(url):
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
@@ -150,15 +168,20 @@ async def main():
             
             if in_stock and not last_state:
                 notify_discord(product_name, url)
-                print(f"🔔 Notification transmise pour {product_name} !")
+                print(f"🔔 Restock alert fired for {product_name}!")
                 
             state[url] = {"in_stock": in_stock, "product_name": product_name}
             await context.close()
             
+        for url in urls_to_check:
+            tasks.append(process_url(url))
+            
+        # Execute all tracking queries concurrently in parallel paths
+        await asyncio.gather(*tasks)
         await browser.close()
         
     save_state(state)
-    print("✅ Session de vérification terminée avec succès.")
+    print("✅ Verification cycle finished successfully.")
 
 if __name__ == "__main__":
     asyncio.run(main())
