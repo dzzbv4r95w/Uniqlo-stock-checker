@@ -21,7 +21,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests
+          pip install playwright requests
+          playwright install chromium
 
       - name: Run stock checker
         env:
